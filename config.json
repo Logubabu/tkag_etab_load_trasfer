@@ -1,0 +1,62 @@
+{
+  "etabs": {
+    "force_length_units": "kN_m_C",
+    "units_enum": 6,
+    "include_area_uniform": true,
+    "include_frame_distributed": true,
+    "include_frame_point": true,
+    "include_joint_point": true,
+    "gravity_only_default": false
+  },
+  "ram": {
+    "length_per_m": 10000.0,
+    "force_per_kN": 1000.0,
+    "line_force_per_kN_per_m": 0.1,
+    "area_force_per_kN_per_m2": 1e-05,
+    "moment_per_kNm": 10000000.0,
+    "write_copy_suffix": "_ETABS_LOADS"
+  },
+  "mapping_rules": [
+    {
+      "match": "(?i)^(SW|SELF[-_ ]?WT|SELF[-_ ]?WEIGHT)$",
+      "ram_loading_type": "self_dead",
+      "action": "skip"
+    },
+    {
+      "match": "(?i)(SDL|SIDL|SUPER|FINISH|FLOOR[-_ ]?FIN|PARTITION|WALL|CLADDING|DEAD)",
+      "ram_loading_type": "other_dead",
+      "action": "transfer"
+    },
+    {
+      "match": "(?i)(PARK)",
+      "ram_loading_type": "live_parking",
+      "action": "transfer"
+    },
+    {
+      "match": "(?i)(ROOF.*LIVE|LIVE.*ROOF|RL)",
+      "ram_loading_type": "live_roof",
+      "action": "transfer"
+    },
+    {
+      "match": "(?i)(STORAGE)",
+      "ram_loading_type": "live_storage",
+      "action": "transfer"
+    },
+    {
+      "match": "(?i)(LIVE|LL)",
+      "ram_loading_type": "live_reducible",
+      "action": "transfer"
+    }
+  ],
+  "unmatched_pattern_action": "review",
+  "default_unmatched_ram_loading_type": "other_dead",
+  "coordinate_transform": {
+    "origin_x_m": 0.0,
+    "origin_y_m": 0.0,
+    "rotation_deg": 0.0,
+    "mirror_x": false,
+    "mirror_y": false
+  },
+  "duplicate_tolerance_m": 0.001,
+  "notes": "Edit mapping rules to suit each project. Self-weight is skipped by default to avoid double counting RAM Concept self-dead."
+}
