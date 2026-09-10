@@ -16,7 +16,19 @@ class EtabsError(RuntimeError):
     pass
 
 def _ret_tuple(value):
-    return value if isinstance(value, tuple) else (value,)
+    if isinstance(value, (tuple, list)):
+        return tuple(value)
+    return (value,)
+
+def _extract_string_list(v):
+    if isinstance(v, (tuple, list)):
+        if v and isinstance(v[0], str):
+            return list(v)
+        for item in v:
+            res = _extract_string_list(item)
+            if res is not None:
+                return res
+    return None
 
 def _strip_ret(v):
     """
@@ -203,9 +215,26 @@ class EtabsBridge:
             raise EtabsError("EDB file not found: " + edb_path)
         if self.sap is None:
             self.connect(start_if_needed=True)
+            
+        try:
+            current_file = self.sap.GetModelFilename()
+            if current_file and os.path.abspath(current_file).lower() == edb_path.lower():
+                self._log("EDB model already open: " + edb_path)
+                self.sap.SetPresentUnits(int(self.cfg["etabs"].get("units_enum", 6)))
+                return True
+        except Exception:
+            pass
+
         self._log("OPEN EDB: " + edb_path)
         ret = self.sap.File.OpenFile(edb_path)
         if isinstance(ret, int) and ret != 0:
+            try:
+                curr = self.sap.GetModelFilename()
+                if curr and os.path.abspath(curr).lower() == edb_path.lower():
+                    self.sap.SetPresentUnits(int(self.cfg["etabs"].get("units_enum", 6)))
+                    return True
+            except Exception:
+                pass
             raise EtabsError(f"Connected to ETABS, but File.OpenFile returned {ret} for:\n{edb_path}")
         self.sap.SetPresentUnits(int(self.cfg["etabs"].get("units_enum", 6)))
         return True
@@ -223,7 +252,6 @@ class EtabsBridge:
             try:
                 raw = obj_api.GetNameListOnStory(*args)
                 ret, out = _strip_ret(raw)
-                # Python COM most often returns (NumberNames, Names)
                 names = None
                 count = None
                 for x in out:
@@ -235,7 +263,56 @@ class EtabsBridge:
                     return names
             except Exception as e:
                 errors.append(repr(e))
-        self._log(f"GetNameListOnStory({story}) failed: " + " | ".join(errors))
+        
+        # Fallback for PointObj if GetNameListOnStory is not supported by ETABS API
+        if hasattr(self, 'sap') and self.sap and obj_api == getattr(self.sap, 'PointObj', None):
+            try:
+                raw_pts = self._call_with_ref_fallback(
+                    self.sap.PointObj.GetNameList,
+                    (),
+                    (0, [])
+                )
+                ret, out = _strip_ret(raw_pts)
+                all_pts = []
+                for x in out:
+                    if isinstance(x, (tuple, list)) and (not x or isinstance(x[0], str)):
+                        all_pts = list(x)
+                        break
+                if all_pts:
+                    # Get story elevation if possible
+                    story_z = None
+                    try:
+                        raw_st = self._call_with_ref_fallback(
+                            self.sap.Story.GetStories,
+                            (),
+                            (0, [], [], [], [], [], [], [], [], [], [])
+                        )
+                        ret, out = _strip_ret(raw_st)
+                        s_names, s_elevs = [], []
+                        for x in out:
+                            if isinstance(x, (tuple, list)) and x:
+                                if isinstance(x[0], str): s_names = list(x)
+                                elif isinstance(x[0], (int, float)): s_elevs = list(x)
+                        if story in s_names and len(s_elevs) == len(s_names):
+                            story_z = float(s_elevs[s_names.index(story)])
+                    except Exception:
+                        pass
+                    
+                    if story_z is not None:
+                        matched = []
+                        for pt in all_pts:
+                            try:
+                                px, py, pz = self._point_xyz(pt)
+                                if abs(pz - story_z) < 1e-3:
+                                    matched.append(pt)
+                            except Exception:
+                                pass
+                        return matched
+                    return all_pts
+            except Exception as e:
+                errors.append("PointObj fallback failed: " + repr(e))
+
+        self._log(f"GetNameListOnStory({story}) failed or returned empty: " + " | ".join(errors))
         return []
 
     def _call_with_ref_fallback(self, method, compact_args, explicit_args):
@@ -260,22 +337,31 @@ class EtabsBridge:
         return {"areas": len(areas), "frames": len(frames), "points": len(points)}
 
     def stories(self):
-        try:
-            raw = self._call_with_ref_fallback(
-                self.sap.Story.GetStories,
-                (),
-                (0, [], [], [], [], [], [], [], [], [], [])
-            )
-            ret, out = _strip_ret(raw)
-            candidates=[]
-            for x in out:
-                if isinstance(x, (tuple, list)) and x and isinstance(x[0], str):
-                    candidates.append(list(x))
-            if candidates:
-                return candidates[0]
-        except Exception as e:
-            self._log("Story.GetStories failed: " + repr(e))
-        raise EtabsError("Connected to ETABS, but could not read the story list.")
+        errors = []
+        # Method 1: Story.GetNameList
+        for args in ((), (0, [])):
+            try:
+                raw = self.sap.Story.GetNameList(*args)
+                self._log(f"GetNameList{args!r} -> raw={raw!r}")
+                names = _extract_string_list(raw)
+                if names:
+                    return names
+            except Exception as e:
+                errors.append(f"GetNameList({args!r}): {e!r}")
+
+        # Method 2: Story.GetStories (8 parameters)
+        for args in ((), (0, [], [], [], [], [], [], [])):
+            try:
+                raw = self.sap.Story.GetStories(*args)
+                self._log(f"GetStories(len={len(args)}) -> raw={raw!r}")
+                names = _extract_string_list(raw)
+                if names:
+                    return names
+            except Exception as e:
+                errors.append(f"GetStories(len={len(args)}): {e!r}")
+
+        log_str = "\n".join(self.connection_log)
+        raise EtabsError(f"Connected to ETABS, but could not read the story list.\nDetails:\n" + "\n".join(errors) + f"\n\nLog:\n{log_str}")
 
     def _point_xyz(self, point_name):
         try:
@@ -389,7 +475,7 @@ class EtabsBridge:
                     arrays = [x for x in out if isinstance(x,(tuple,list))]
                     sarr = [list(x) for x in arrays if (not x or isinstance(x[0],str))]
                     narr = [list(x) for x in arrays if x and isinstance(x[0],(int,float))]
-                    if len(sarr) >= 3 and len(narr) >= 8:
+                    if len(sarr) >= 3 and len(narr) >= 6:
                         loadp, csy = sarr[-2], sarr[-1]
                         mytype, dirs = narr[0], narr[1]
                         dist1, dist2, val1, val2 = narr[-4], narr[-3], narr[-2], narr[-1]
@@ -429,7 +515,7 @@ class EtabsBridge:
                     arrays = [x for x in out if isinstance(x,(tuple,list))]
                     sarr = [list(x) for x in arrays if (not x or isinstance(x[0],str))]
                     narr = [list(x) for x in arrays if x and isinstance(x[0],(int,float))]
-                    if len(sarr) >= 3 and len(narr) >= 7:
+                    if len(sarr) >= 3 and len(narr) >= 6:
                         loadp, csy = sarr[-2], sarr[-1]
                         f1,f2,f3,m1,m2,m3 = narr[-6:]
                         for pat,cs,a,b,c,d,e,f in zip(loadp,csy,f1,f2,f3,m1,m2,m3):
